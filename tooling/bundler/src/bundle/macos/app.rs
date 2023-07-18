@@ -35,6 +35,7 @@ use log::{info, warn};
 use std::{
   fs,
   path::{Path, PathBuf},
+  process::{Command, Stdio},
 };
 
 /// Bundles the project.
