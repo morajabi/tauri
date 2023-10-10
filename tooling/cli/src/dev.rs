@@ -7,6 +7,7 @@ use crate::{
     app_paths::{app_dir, tauri_dir},
     command_env,
     config::{get as get_config, reload as reload_config, AppUrl, BeforeDevCommand, WindowUrl},
+    resolve_merge_config,
   },
   interface::{AppInterface, DevProcess, ExitReason, Interface},
   CommandExt, Result,
@@ -17,11 +18,12 @@ use clap::{ArgAction, Parser};
 use log::{error, info, warn};
 use once_cell::sync::OnceCell;
 use shared_child::SharedChild;
+use tauri_utils::platform::Target;
 
 use std::{
   env::set_current_dir,
   net::{IpAddr, Ipv4Addr},
-  process::{exit, Command, ExitStatus, Stdio},
+  process::{exit, Command, Stdio},
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -78,14 +80,17 @@ pub fn command(options: Options) -> Result<()> {
   let r = command_internal(options);
   if r.is_err() {
     kill_before_dev_process();
-    #[cfg(not(debug_assertions))]
-    let _ = check_for_updates();
   }
   r
 }
 
 fn command_internal(mut options: Options) -> Result<()> {
-  let mut interface = setup(&mut options, false)?;
+  let target = options
+    .target
+    .as_deref()
+    .map(Target::from_triple)
+    .unwrap_or_else(Target::current);
+  let mut interface = setup(target, &mut options, false)?;
   let exit_on_panic = options.exit_on_panic;
   let no_watch = options.no_watch;
   interface.dev(options.into(), move |status, reason| {
@@ -136,21 +141,14 @@ pub fn local_ip_address(force: bool) -> &'static IpAddr {
   })
 }
 
-pub fn setup(options: &mut Options, mobile: bool) -> Result<AppInterface> {
+pub fn setup(target: Target, options: &mut Options, mobile: bool) -> Result<AppInterface> {
+  let (merge_config, _merge_config_path) = resolve_merge_config(&options.config)?;
+  options.config = merge_config;
+
+  let config = get_config(target, options.config.as_deref())?;
+
   let tauri_path = tauri_dir();
-  options.config = if let Some(config) = &options.config {
-    Some(if config.starts_with('{') {
-      config.to_string()
-    } else {
-      std::fs::read_to_string(config).with_context(|| "failed to read custom configuration")?
-    })
-  } else {
-    None
-  };
-
   set_current_dir(tauri_path).with_context(|| "failed to change current working directory")?;
-
-  let config = get_config(options.config.as_deref())?;
 
   let interface = AppInterface::new(
     config.lock().unwrap().as_ref().unwrap(),
@@ -268,8 +266,6 @@ pub fn setup(options: &mut Options, mobile: bool) -> Result<AppInterface> {
 
         let _ = ctrlc::set_handler(move || {
           kill_before_dev_process();
-          #[cfg(not(debug_assertions))]
-          let _ = check_for_updates();
           exit(130);
         });
       }
@@ -313,7 +309,12 @@ pub fn setup(options: &mut Options, mobile: bool) -> Result<AppInterface> {
       use crate::helpers::web_dev_server::start_dev_server;
       if path.exists() {
         let path = path.canonicalize()?;
-        let server_url = start_dev_server(path, options.port);
+        let ip = if mobile {
+          *local_ip_address(options.force_ip_prompt)
+        } else {
+          Ipv4Addr::new(127, 0, 0, 1).into()
+        };
+        let server_url = start_dev_server(path, ip, options.port)?;
         let server_url = format!("http://{server_url}");
         dev_path = AppUrl::Url(WindowUrl::External(server_url.parse().unwrap()));
 
@@ -361,11 +362,15 @@ pub fn setup(options: &mut Options, mobile: bool) -> Result<AppInterface> {
       };
       let mut i = 0;
       let sleep_interval = std::time::Duration::from_secs(2);
+      let timeout_duration = std::time::Duration::from_secs(1);
       let max_attempts = 90;
-      loop {
-        if std::net::TcpStream::connect(addrs).is_ok() {
-          break;
+      'waiting: loop {
+        for addr in addrs.iter() {
+          if std::net::TcpStream::connect_timeout(addr, timeout_duration).is_ok() {
+            break 'waiting;
+          }
         }
+
         if i % 3 == 1 {
           warn!(
             "Waiting for your frontend dev server to start on {}...",
@@ -390,15 +395,19 @@ pub fn setup(options: &mut Options, mobile: bool) -> Result<AppInterface> {
 
 pub fn wait_dev_process<
   C: DevProcess + Send + 'static,
-  F: Fn(ExitStatus, ExitReason) + Send + Sync + 'static,
+  F: Fn(Option<i32>, ExitReason) + Send + Sync + 'static,
 >(
   child: C,
   on_exit: F,
 ) {
   std::thread::spawn(move || {
-    let status = child.wait().expect("failed to wait on app");
+    let code = child
+      .wait()
+      .ok()
+      .and_then(|status| status.code())
+      .or(Some(1));
     on_exit(
-      status,
+      code,
       if child.manually_killed_process() {
         ExitReason::TriggeredKill
       } else {
@@ -408,7 +417,7 @@ pub fn wait_dev_process<
   });
 }
 
-pub fn on_app_exit(status: ExitStatus, reason: ExitReason, exit_on_panic: bool, no_watch: bool) {
+pub fn on_app_exit(code: Option<i32>, reason: ExitReason, exit_on_panic: bool, no_watch: bool) {
   if no_watch
     || (!matches!(reason, ExitReason::TriggeredKill)
       && (exit_on_panic || matches!(reason, ExitReason::NormalExit)))
@@ -416,7 +425,7 @@ pub fn on_app_exit(status: ExitStatus, reason: ExitReason, exit_on_panic: bool, 
     kill_before_dev_process();
     #[cfg(not(debug_assertions))]
     let _ = check_for_updates();
-    exit(status.code().unwrap_or(0));
+    exit(code.unwrap_or(0));
   }
 }
 
@@ -441,10 +450,11 @@ fn check_for_updates() -> Result<()> {
 pub fn kill_before_dev_process() {
   if let Some(child) = BEFORE_DEV.get() {
     let child = child.lock().unwrap();
-    KILL_BEFORE_DEV_FLAG
-      .get()
-      .unwrap()
-      .store(true, Ordering::Relaxed);
+    let kill_before_dev_flag = KILL_BEFORE_DEV_FLAG.get().unwrap();
+    if kill_before_dev_flag.load(Ordering::Relaxed) {
+      return;
+    }
+    kill_before_dev_flag.store(true, Ordering::Relaxed);
     #[cfg(windows)]
     {
       let powershell_path = std::env::var("SYSTEMROOT").map_or_else(

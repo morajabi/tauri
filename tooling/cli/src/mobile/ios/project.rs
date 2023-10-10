@@ -4,23 +4,22 @@
 
 use crate::{helpers::template, Result};
 use anyhow::Context;
+use cargo_mobile2::{
+  apple::{
+    config::{Config, Metadata},
+    deps, rust_version_check,
+    target::Target,
+  },
+  config::app::DEFAULT_ASSET_DIR,
+  target::TargetTrait as _,
+  util::{self, cli::TextWrapper},
+};
 use handlebars::Handlebars;
 use include_dir::{include_dir, Dir};
 use std::{
   ffi::{OsStr, OsString},
   fs::{create_dir_all, OpenOptions},
   path::{Component, PathBuf},
-};
-use tauri_mobile::{
-  apple::{
-    config::{Config, Metadata},
-    deps, rust_version_check,
-    target::Target,
-  },
-  bossy,
-  config::app::DEFAULT_ASSET_DIR,
-  target::TargetTrait as _,
-  util::{self, cli::TextWrapper},
 };
 
 const TEMPLATE_DIR: Dir<'_> = include_dir!("templates/mobile/ios");
@@ -34,9 +33,26 @@ pub fn gen(
   wrapper: &TextWrapper,
   non_interactive: bool,
   reinstall_deps: bool,
+  skip_targets_install: bool,
 ) -> Result<()> {
-  println!("Installing iOS toolchains...");
-  Target::install_all()?;
+  if !skip_targets_install {
+    let installed_targets =
+      crate::interface::rust::installation::installed_targets().unwrap_or_default();
+    let missing_targets = Target::all()
+      .values()
+      .filter(|t| !installed_targets.contains(&t.triple().into()))
+      .collect::<Vec<&Target>>();
+
+    if !missing_targets.is_empty() {
+      println!("Installing iOS Rust toolchains...");
+      for target in missing_targets {
+        target
+          .install()
+          .context("failed to install target with rustup")?;
+      }
+    }
+  }
+
   rust_version_check(wrapper)?;
 
   deps::install_all(wrapper, non_interactive, true, reinstall_deps)
@@ -148,28 +164,13 @@ pub fn gen(
   )
   .with_context(|| "failed to process template")?;
 
-  let asset_dir = dest.join(DEFAULT_ASSET_DIR);
-  if !asset_dir.is_dir() {
-    create_dir_all(&asset_dir).map_err(|cause| {
-      anyhow::anyhow!(
-        "failed to create asset dir {path}: {cause}",
-        path = asset_dir.display()
-      )
-    })?;
-  }
+  let mut dirs_to_create = asset_catalogs.to_vec();
+  dirs_to_create.push(dest.join(DEFAULT_ASSET_DIR));
+  dirs_to_create.push(dest.join("Externals"));
+  dirs_to_create.push(dest.join(format!("{}_iOS", config.app().name())));
 
-  let externals_dir = dest.join("Externals");
-  if !externals_dir.is_dir() {
-    create_dir_all(&externals_dir).map_err(|cause| {
-      anyhow::anyhow!(
-        "failed to create Externals dir {path}: {cause}",
-        path = externals_dir.display()
-      )
-    })?;
-  }
-
-  // Create all asset catalog directories if they don't already exist
-  for dir in asset_catalogs {
+  // Create all required project directories if they don't already exist
+  for dir in &dirs_to_create {
     std::fs::create_dir_all(dir).map_err(|cause| {
       anyhow::anyhow!(
         "failed to create directory at {path}: {cause}",
@@ -181,17 +182,27 @@ pub fn gen(
   // Note that Xcode doesn't always reload the project nicely; reopening is
   // often necessary.
   println!("Generating Xcode project...");
-  bossy::Command::impure("xcodegen")
-    .with_args(["generate", "--spec"])
-    .with_arg(dest.join("project.yml"))
-    .run_and_wait()
-    .with_context(|| "failed to run `xcodegen`")?;
+  duct::cmd(
+    "xcodegen",
+    [
+      "generate",
+      "--spec",
+      &dest.join("project.yml").to_string_lossy(),
+    ],
+  )
+  .run()
+  .with_context(|| "failed to run `xcodegen`")?;
 
   if !ios_pods.is_empty() || !macos_pods.is_empty() {
-    bossy::Command::impure_parse("pod install")
-      .with_arg(format!("--project-directory={}", dest.display()))
-      .run_and_wait()
-      .with_context(|| "failed to run `pod install`")?;
+    duct::cmd(
+      "pod",
+      [
+        "install",
+        &format!("--project-directory={}", dest.display()),
+      ],
+    )
+    .run()
+    .with_context(|| "failed to run `pod install`")?;
   }
   Ok(())
 }

@@ -2,10 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
 
-use clap::{Parser, Subcommand};
-use std::{env::set_var, fs::create_dir, process::exit, thread::sleep, time::Duration};
-use sublime_fuzzy::best_match;
-use tauri_mobile::{
+use cargo_mobile2::{
   android::{
     adb,
     config::{Config as AndroidConfig, Metadata as AndroidMetadata, Raw as RawAndroidConfig},
@@ -14,11 +11,20 @@ use tauri_mobile::{
     env::Env,
     target::Target,
   },
-  config::app::App,
+  config::app::{App, DEFAULT_ASSET_DIR},
   opts::{FilterLevel, NoiseLevel},
   os,
   util::prompt,
 };
+use clap::{Parser, Subcommand};
+use std::{
+  env::set_var,
+  fs::{create_dir, create_dir_all, write},
+  process::exit,
+  thread::sleep,
+  time::Duration,
+};
+use sublime_fuzzy::best_match;
 
 use super::{
   ensure_init, get_app,
@@ -26,10 +32,7 @@ use super::{
   log_finished, read_options, setup_dev_config, CliOptions, Target as MobileTarget,
   MIN_DEVICE_MATCH_SCORE,
 };
-use crate::{
-  helpers::config::{get as get_tauri_config, Config as TauriConfig},
-  Result,
-};
+use crate::{helpers::config::Config as TauriConfig, Result};
 
 mod android_studio_script;
 mod build;
@@ -56,6 +59,9 @@ pub struct InitOptions {
   /// Skip prompting for values
   #[clap(long)]
   ci: bool,
+  /// Skips installing rust toolchains via rustup
+  #[clap(long)]
+  skip_targets_install: bool,
 }
 
 #[derive(Subcommand)]
@@ -72,7 +78,12 @@ enum Commands {
 pub fn command(cli: Cli, verbosity: u8) -> Result<()> {
   let noise_level = NoiseLevel::from_occurrences(verbosity as u64);
   match cli.command {
-    Commands::Init(options) => init_command(MobileTarget::Android, options.ci, false)?,
+    Commands::Init(options) => init_command(
+      MobileTarget::Android,
+      options.ci,
+      false,
+      options.skip_targets_install,
+    )?,
     Commands::Open => open::command()?,
     Commands::Dev(options) => dev::command(options, noise_level)?,
     Commands::Build(options) => build::command(options, noise_level)?,
@@ -83,11 +94,10 @@ pub fn command(cli: Cli, verbosity: u8) -> Result<()> {
 }
 
 pub fn get_config(
-  app: Option<App>,
+  app: &App,
   config: &TauriConfig,
   cli_options: &CliOptions,
-) -> (App, AndroidConfig, AndroidMetadata) {
-  let app = app.unwrap_or_else(|| get_app(config));
+) -> (AndroidConfig, AndroidMetadata) {
   let android_options = cli_options.clone();
 
   let raw = RawAndroidConfig {
@@ -104,6 +114,7 @@ pub fn get_config(
         .logcat()
       ),
     ],
+    min_sdk_version: Some(config.tauri.bundle.android.min_sdk_version),
     ..Default::default()
   };
   let config = AndroidConfig::from_raw(app.clone(), Some(raw)).unwrap();
@@ -143,28 +154,12 @@ pub fn get_config(
     src_main_dir.join("generated"),
   );
 
-  (app, config, metadata)
-}
-
-pub fn with_config<T>(
-  cli_options: Option<CliOptions>,
-  f: impl FnOnce(&App, &AndroidConfig, &AndroidMetadata, CliOptions) -> Result<T>,
-) -> Result<T> {
-  let (app, config, metadata, cli_options) = {
-    let tauri_config = get_tauri_config(None)?;
-    let tauri_config_guard = tauri_config.lock().unwrap();
-    let tauri_config_ = tauri_config_guard.as_ref().unwrap();
-    let cli_options =
-      cli_options.unwrap_or_else(|| read_options(&tauri_config_.tauri.bundle.identifier));
-    let (app, config, metadata) = get_config(None, tauri_config_, &cli_options);
-    (app, config, metadata, cli_options)
-  };
-  f(&app, &config, &metadata, cli_options)
+  (config, metadata)
 }
 
 fn env() -> Result<Env> {
   let env = super::env()?;
-  tauri_mobile::android::env::Env::from_env(env).map_err(Into::into)
+  cargo_mobile2::android::env::Env::from_env(env).map_err(Into::into)
 }
 
 fn delete_codegen_vars() {
@@ -294,4 +289,19 @@ fn open_and_wait(config: &AndroidConfig, env: &Env) -> ! {
   loop {
     sleep(Duration::from_secs(24 * 60 * 60));
   }
+}
+
+fn inject_assets(config: &AndroidConfig, tauri_config: &TauriConfig) -> Result<()> {
+  let asset_dir = config
+    .project_dir()
+    .join("app/src/main")
+    .join(DEFAULT_ASSET_DIR);
+  create_dir_all(&asset_dir)?;
+
+  write(
+    asset_dir.join("tauri.conf.json"),
+    serde_json::to_string(&tauri_config)?,
+  )?;
+
+  Ok(())
 }

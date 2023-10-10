@@ -356,24 +356,19 @@ fn png(source: &DynamicImage, out_dir: &Path, ios_color: Rgba<u8>) -> Result<()>
   }
 
   let mut entries = desktop_entries(out_dir);
-  let _ = crate::mobile::android::with_config(
-    Some(Default::default()),
-    |_app, config, _metadata, _cli_options| {
-      let android_out = out_dir.parent().unwrap().join(format!(
-        "gen/android/{}/app/src/main/res/",
-        config.app().name_snake()
-      ));
-      let out = if android_out.exists() {
-        android_out
-      } else {
-        let out = out_dir.join("android");
-        create_dir_all(&out).context("Can't create Android output directory")?;
-        out
-      };
-      entries.extend(android_entries(&out)?);
-      Ok(())
-    },
-  );
+
+  let android_out = out_dir
+    .parent()
+    .unwrap()
+    .join("gen/android/app/src/main/res/");
+  let out = if android_out.exists() {
+    android_out
+  } else {
+    let out = out_dir.join("android");
+    create_dir_all(&out).context("Can't create Android output directory")?;
+    out
+  };
+  entries.extend(android_entries(&out)?);
 
   let ios_out = out_dir
     .parent()

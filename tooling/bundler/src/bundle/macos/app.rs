@@ -168,6 +168,45 @@ fn create_info_plist(
   if let Some(version) = settings.macos().minimum_system_version.clone() {
     plist.insert("LSMinimumSystemVersion".into(), version.into());
   }
+
+  if let Some(associations) = settings.file_associations() {
+    plist.insert(
+      "CFBundleDocumentTypes".into(),
+      plist::Value::Array(
+        associations
+          .iter()
+          .map(|association| {
+            let mut dict = plist::Dictionary::new();
+            dict.insert(
+              "CFBundleTypeExtensions".into(),
+              plist::Value::Array(
+                association
+                  .ext
+                  .iter()
+                  .map(|ext| ext.to_string().into())
+                  .collect(),
+              ),
+            );
+            dict.insert(
+              "CFBundleTypeName".into(),
+              association
+                .name
+                .as_ref()
+                .unwrap_or(&association.ext[0].0)
+                .to_string()
+                .into(),
+            );
+            dict.insert(
+              "CFBundleTypeRole".into(),
+              association.role.to_string().into(),
+            );
+            plist::Value::Dictionary(dict)
+          })
+          .collect(),
+      ),
+    );
+  }
+
   plist.insert("LSRequiresCarbon".into(), true.into());
   plist.insert("NSHighResolutionCapable".into(), true.into());
   if let Some(copyright) = settings.copyright_string() {
@@ -252,7 +291,7 @@ fn copy_frameworks_to_bundle(
   }
   let mut copied = vec![];
   let dest_dir = bundle_directory.join("Frameworks");
-  fs::create_dir_all(&bundle_directory)
+  fs::create_dir_all(bundle_directory)
     .with_context(|| format!("Failed to create Frameworks directory at {:?}", dest_dir))?;
   for framework in frameworks.iter() {
     if framework.ends_with(".framework") {
@@ -260,7 +299,7 @@ fn copy_frameworks_to_bundle(
       let src_name = src_path
         .file_name()
         .expect("Couldn't get framework filename");
-      common::copy_dir(&src_path, &dest_dir.join(&src_name))?;
+      common::copy_dir(&src_path, &dest_dir.join(src_name))?;
       copied.push(framework.to_string());
       continue;
     } else if framework.ends_with(".dylib") {
@@ -272,7 +311,7 @@ fn copy_frameworks_to_bundle(
         )));
       }
       let src_name = src_path.file_name().expect("Couldn't get library filename");
-      common::copy_file(&src_path, &dest_dir.join(&src_name))?;
+      common::copy_file(&src_path, &dest_dir.join(src_name))?;
       continue;
     } else if framework.contains('/') {
       return Err(crate::Error::GenericError(format!(

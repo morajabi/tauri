@@ -5,8 +5,7 @@
 use super::{get_app, Target};
 use crate::helpers::{config::get as get_tauri_config, template::JsonMap};
 use crate::Result;
-use handlebars::{Context, Handlebars, Helper, HelperResult, Output, RenderContext, RenderError};
-use tauri_mobile::{
+use cargo_mobile2::{
   android::{
     config::Config as AndroidConfig, env::Env as AndroidEnv, target::Target as AndroidTarget,
   },
@@ -18,19 +17,27 @@ use tauri_mobile::{
     cli::{Report, TextWrapper},
   },
 };
+use handlebars::{Context, Handlebars, Helper, HelperResult, Output, RenderContext, RenderError};
 
 use std::{
   env::{current_dir, var, var_os},
   path::PathBuf,
 };
 
-pub fn command(target: Target, ci: bool, reinstall_deps: bool) -> Result<()> {
+pub fn command(
+  target: Target,
+  ci: bool,
+  reinstall_deps: bool,
+  skip_targets_install: bool,
+) -> Result<()> {
   let wrapper = TextWrapper::with_splitter(textwrap::termwidth(), textwrap::NoHyphenation);
+
   exec(
     target,
     &wrapper,
     ci || var_os("CI").is_some(),
     reinstall_deps,
+    skip_targets_install,
   )
   .map_err(|e| anyhow::anyhow!("{:#}", e))?;
   Ok(())
@@ -78,8 +85,11 @@ pub fn exec(
   wrapper: &TextWrapper,
   #[allow(unused_variables)] non_interactive: bool,
   #[allow(unused_variables)] reinstall_deps: bool,
+  skip_targets_install: bool,
 ) -> Result<App> {
-  let tauri_config = get_tauri_config(None)?;
+  let current_dir = current_dir()?;
+  let tauri_config = get_tauri_config(target.platform_target(), None)?;
+
   let tauri_config_guard = tauri_config.lock().unwrap();
   let tauri_config_ = tauri_config_guard.as_ref().unwrap();
 
@@ -93,10 +103,8 @@ pub fn exec(
     .map(|bin| {
       let path = PathBuf::from(&bin);
       if path.exists() {
-        if let Ok(dir) = current_dir() {
-          let absolute_path = util::prefix_path(dir, path);
-          return absolute_path.into();
-        }
+        let absolute_path = util::prefix_path(&current_dir, path);
+        return absolute_path.into();
       }
       bin
     })
@@ -105,11 +113,9 @@ pub fn exec(
   for arg in args {
     let path = PathBuf::from(&arg);
     if path.exists() {
-      if let Ok(dir) = current_dir() {
-        let absolute_path = util::prefix_path(dir, path);
-        build_args.push(absolute_path.to_string_lossy().into_owned());
-        continue;
-      }
+      let absolute_path = util::prefix_path(&current_dir, path);
+      build_args.push(absolute_path.to_string_lossy().into_owned());
+      continue;
     }
     build_args.push(arg.to_string_lossy().into_owned());
     if arg == "android" || arg == "ios" {
@@ -124,21 +130,31 @@ pub fn exec(
   if r.is_match(&bin_stem) {
     if let Some(npm_execpath) = var_os("npm_execpath").map(PathBuf::from) {
       let manager_stem = npm_execpath.file_stem().unwrap().to_os_string();
-      let manager = if manager_stem == "npm-cli" {
+      let is_npm = manager_stem == "npm-cli";
+      let is_npx = manager_stem == "npx-cli";
+      binary = if is_npm {
         "npm".into()
+      } else if is_npx {
+        "npx".into()
       } else {
         manager_stem
       };
-      binary = manager;
-      if !build_args.is_empty() {
+      if !(build_args.is_empty() || is_npx) {
         // remove script path, we'll use `npm_lifecycle_event` instead
         build_args.remove(0);
       }
-      build_args.insert(0, "--".into());
-      build_args.insert(0, var("npm_lifecycle_event").unwrap());
-      build_args.insert(0, "run".into());
+      if is_npm {
+        build_args.insert(0, "--".into());
+      }
+      if !is_npx {
+        build_args.insert(0, var("npm_lifecycle_event").unwrap());
+      }
+      if is_npm {
+        build_args.insert(0, "run".into());
+      }
     }
   }
+
   map.insert("tauri-binary", binary.to_string_lossy());
   map.insert("tauri-binary-args", &build_args);
   map.insert("tauri-binary-args-str", build_args.join(" "));
@@ -147,10 +163,17 @@ pub fn exec(
     // Generate Android Studio project
     Target::Android => match AndroidEnv::new() {
       Ok(_env) => {
-        let (app, config, metadata) =
-          super::android::get_config(Some(app), tauri_config_, &Default::default());
+        let app = get_app(tauri_config_);
+        let (config, metadata) =
+          super::android::get_config(&app, tauri_config_, &Default::default());
         map.insert("android", &config);
-        super::android::project::gen(&config, &metadata, (handlebars, map), wrapper)?;
+        super::android::project::gen(
+          &config,
+          &metadata,
+          (handlebars, map),
+          wrapper,
+          skip_targets_install,
+        )?;
         app
       }
       Err(err) => {
@@ -169,8 +192,7 @@ pub fn exec(
     #[cfg(target_os = "macos")]
     // Generate Xcode project
     Target::Ios => {
-      let (app, config, metadata) =
-        super::ios::get_config(Some(app), tauri_config_, &Default::default());
+      let (config, metadata) = super::ios::get_config(&app, tauri_config_, &Default::default());
       map.insert("apple", &config);
       super::ios::project::gen(
         &config,
@@ -179,6 +201,7 @@ pub fn exec(
         wrapper,
         non_interactive,
         reinstall_deps,
+        skip_targets_install,
       )?;
       app
     }

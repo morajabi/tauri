@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
 
-use super::{AppSettings, DevProcess, ExitReason, Options, RustAppSettings, Target};
+use super::{
+  get_profile, AppSettings, DevProcess, ExitReason, Options, RustAppSettings, RustupTarget,
+};
 use crate::CommandExt;
 use tauri_utils::display_path;
 
@@ -66,10 +68,10 @@ impl DevProcess for DevChild {
   }
 }
 
-pub fn run_dev<F: Fn(ExitStatus, ExitReason) + Send + Sync + 'static>(
+pub fn run_dev<F: Fn(Option<i32>, ExitReason) + Send + Sync + 'static>(
   options: Options,
   run_args: Vec<String>,
-  available_targets: &mut Option<Vec<Target>>,
+  available_targets: &mut Option<Vec<RustupTarget>>,
   config_features: Vec<String>,
   app_settings: &RustAppSettings,
   product_name: Option<String>,
@@ -93,7 +95,7 @@ pub fn run_dev<F: Fn(ExitStatus, ExitReason) + Send + Sync + 'static>(
     available_targets,
     config_features,
     move |status, reason| {
-      if status.success() {
+      if status == Some(0) {
         let bin_path =
           rename_app(target_os, &bin_path, product_name.as_deref()).expect("failed to rename app");
         let mut app = Command::new(bin_path);
@@ -135,7 +137,7 @@ pub fn build(
   options: Options,
   app_settings: &RustAppSettings,
   product_name: Option<String>,
-  available_targets: &mut Option<Vec<Target>>,
+  available_targets: &mut Option<Vec<RustupTarget>>,
   config_features: Vec<String>,
 ) -> crate::Result<()> {
   let bin_path = app_settings.app_binary_path(&options)?;
@@ -167,7 +169,7 @@ pub fn build(
       options.target.replace(triple.into());
 
       let triple_out_dir = app_settings
-        .out_dir(Some(triple.into()), options.debug)
+        .out_dir(Some(triple.into()), get_profile(&options))
         .with_context(|| format!("failed to get {triple} out dir"))?;
 
       build_production_app(options, available_targets, config_features.clone())
@@ -192,9 +194,9 @@ pub fn build(
   Ok(())
 }
 
-fn build_dev_app<F: FnOnce(ExitStatus, ExitReason) + Send + 'static>(
+fn build_dev_app<F: FnOnce(Option<i32>, ExitReason) + Send + 'static>(
   options: Options,
-  available_targets: &mut Option<Vec<Target>>,
+  available_targets: &mut Option<Vec<RustupTarget>>,
   config_features: Vec<String>,
   on_exit: F,
 ) -> crate::Result<Arc<SharedChild>> {
@@ -245,9 +247,8 @@ fn build_dev_app<F: FnOnce(ExitStatus, ExitReason) + Send + 'static>(
     let mut io_stderr = std::io::stderr();
     loop {
       buf.clear();
-      match tauri_utils::io::read_line(&mut stderr, &mut buf) {
-        Ok(s) if s == 0 => break,
-        _ => (),
+      if let Ok(0) = tauri_utils::io::read_line(&mut stderr, &mut buf) {
+        break;
       }
       let _ = io_stderr.write_all(&buf);
       if !buf.ends_with(&[b'\r']) {
@@ -259,10 +260,10 @@ fn build_dev_app<F: FnOnce(ExitStatus, ExitReason) + Send + 'static>(
 
   let build_child_ = build_child.clone();
   std::thread::spawn(move || {
-    let status = build_child_.wait().expect("failed to wait on build");
+    let status = build_child_.wait().expect("failed to build app");
 
     if status.success() {
-      on_exit(status, ExitReason::NormalExit);
+      on_exit(status.code(), ExitReason::NormalExit);
     } else {
       let is_cargo_compile_error = stderr_lines
         .lock()
@@ -273,7 +274,7 @@ fn build_dev_app<F: FnOnce(ExitStatus, ExitReason) + Send + 'static>(
       stderr_lines.lock().unwrap().clear();
 
       on_exit(
-        status,
+        status.code(),
         if status.code() == Some(101) && is_cargo_compile_error {
           ExitReason::CompilationFailed
         } else {
@@ -288,7 +289,7 @@ fn build_dev_app<F: FnOnce(ExitStatus, ExitReason) + Send + 'static>(
 
 fn build_production_app(
   options: Options,
-  available_targets: &mut Option<Vec<Target>>,
+  available_targets: &mut Option<Vec<RustupTarget>>,
   config_features: Vec<String>,
 ) -> crate::Result<()> {
   let mut build_cmd = build_command(options, available_targets, config_features)?;
@@ -311,7 +312,7 @@ fn build_production_app(
 
 fn build_command(
   options: Options,
-  available_targets: &mut Option<Vec<Target>>,
+  available_targets: &mut Option<Vec<RustupTarget>>,
   config_features: Vec<String>,
 ) -> crate::Result<Command> {
   let runner = options.runner.unwrap_or_else(|| "cargo".into());
@@ -353,7 +354,7 @@ fn build_command(
   Ok(build_cmd)
 }
 
-fn fetch_available_targets() -> Option<Vec<Target>> {
+fn fetch_available_targets() -> Option<Vec<RustupTarget>> {
   if let Ok(output) = Command::new("rustup").args(["target", "list"]).output() {
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     Some(
@@ -363,7 +364,7 @@ fn fetch_available_targets() -> Option<Vec<Target>> {
           let mut s = t.split(' ');
           let name = s.next().unwrap().to_string();
           let installed = s.next().map(|v| v == "(installed)").unwrap_or_default();
-          Target { name, installed }
+          RustupTarget { name, installed }
         })
         .filter(|t| !t.name.is_empty())
         .collect(),
@@ -373,7 +374,10 @@ fn fetch_available_targets() -> Option<Vec<Target>> {
   }
 }
 
-fn validate_target(available_targets: &Option<Vec<Target>>, target: &str) -> crate::Result<()> {
+fn validate_target(
+  available_targets: &Option<Vec<RustupTarget>>,
+  target: &str,
+) -> crate::Result<()> {
   if let Some(available_targets) = available_targets {
     if let Some(target) = available_targets.iter().find(|t| t.name == target) {
       if !target.installed {

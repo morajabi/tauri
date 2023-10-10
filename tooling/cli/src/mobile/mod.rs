@@ -12,19 +12,25 @@ use crate::{
   interface::{AppInterface, AppSettings, DevProcess, Interface, Options as InterfaceOptions},
 };
 use anyhow::{bail, Result};
-use jsonrpsee::client_transport::ws::WsTransportClientBuilder;
+use heck::ToSnekCase;
 use jsonrpsee::core::client::{Client, ClientBuilder, ClientT};
-use jsonrpsee::rpc_params;
 use jsonrpsee::server::{RpcModule, ServerBuilder, ServerHandle};
+use jsonrpsee_client_transport::ws::WsTransportClientBuilder;
+use jsonrpsee_core::rpc_params;
 use serde::{Deserialize, Serialize};
-use shared_child::SharedChild;
 
+use cargo_mobile2::{
+  config::app::{App, Raw as RawAppConfig},
+  env::Error as EnvError,
+  opts::{NoiseLevel, Profile},
+  ChildHandle,
+};
 use std::{
   collections::HashMap,
   env::{set_var, temp_dir},
   ffi::OsString,
   fmt::Write,
-  fs::{create_dir_all, read_to_string, write},
+  fs::{read_to_string, write},
   net::SocketAddr,
   path::PathBuf,
   process::{exit, ExitStatus},
@@ -33,18 +39,12 @@ use std::{
     Arc,
   },
 };
-use tauri_mobile::{
-  bossy,
-  config::app::{App, Raw as RawAppConfig},
-  env::Error as EnvError,
-  opts::{NoiseLevel, Profile},
-};
 use tokio::runtime::Runtime;
 
 #[cfg(not(windows))]
-use tauri_mobile::env::Env;
+use cargo_mobile2::env::Env;
 #[cfg(windows)]
-use tauri_mobile::os::Env;
+use cargo_mobile2::os::Env;
 
 pub mod android;
 mod init;
@@ -55,14 +55,14 @@ const MIN_DEVICE_MATCH_SCORE: isize = 0;
 
 #[derive(Clone)]
 pub struct DevChild {
-  child: Arc<SharedChild>,
+  child: Arc<ChildHandle>,
   manually_killed_process: Arc<AtomicBool>,
 }
 
 impl DevChild {
-  fn new(handle: bossy::Handle) -> Self {
+  fn new(handle: ChildHandle) -> Self {
     Self {
-      child: Arc::new(SharedChild::new(handle.into()).unwrap()),
+      child: Arc::new(handle),
       manually_killed_process: Default::default(),
     }
   }
@@ -76,11 +76,11 @@ impl DevProcess for DevChild {
   }
 
   fn try_wait(&self) -> std::io::Result<Option<ExitStatus>> {
-    self.child.try_wait()
+    self.child.try_wait().map(|res| res.map(|o| o.status))
   }
 
   fn wait(&self) -> std::io::Result<ExitStatus> {
-    self.child.wait()
+    self.child.wait().map(|o| o.status)
   }
 
   fn manually_killed_process(&self) -> bool {
@@ -123,9 +123,17 @@ impl Target {
       Self::Ios => "xcode-script",
     }
   }
+
+  fn platform_target(&self) -> tauri_utils::platform::Target {
+    match self {
+      Self::Android => tauri_utils::platform::Target::Android,
+      #[cfg(target_os = "macos")]
+      Self::Ios => tauri_utils::platform::Target::Ios,
+    }
+  }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliOptions {
   pub features: Option<Vec<String>>,
   pub args: Vec<String>,
@@ -133,11 +141,23 @@ pub struct CliOptions {
   pub vars: HashMap<String, OsString>,
 }
 
+impl Default for CliOptions {
+  fn default() -> Self {
+    Self {
+      features: None,
+      args: vec!["--lib".into()],
+      noise_level: Default::default(),
+      vars: Default::default(),
+    }
+  }
+}
+
 fn setup_dev_config(
+  target: Target,
   config_extension: &mut Option<String>,
   force_ip_prompt: bool,
 ) -> crate::Result<()> {
-  let config = get_config(config_extension.as_deref())?;
+  let config = get_config(target.platform_target(), config_extension.as_deref())?;
 
   let mut dev_path = config
     .lock()
@@ -251,7 +271,7 @@ fn read_options(identifier: &str) -> CliOptions {
   options
 }
 
-fn get_app(config: &TauriConfig) -> App {
+pub fn get_app(config: &TauriConfig) -> App {
   let mut s = config.tauri.bundle.identifier.rsplit('.');
   let app_name = s.next().unwrap_or("app").to_string();
   let mut domain = String::new();
@@ -282,7 +302,7 @@ fn get_app(config: &TauriConfig) -> App {
   let lib_name = interface
     .app_settings()
     .lib_name()
-    .unwrap_or(app_name.clone());
+    .unwrap_or_else(|| app_name.to_snek_case());
 
   let raw = RawAppConfig {
     name: app_name,
@@ -315,10 +335,8 @@ fn ensure_init(project_dir: PathBuf, target: Target) -> Result<()> {
       project_dir.display(),
       target.command_name(),
     )
-  } else {
-    create_dir_all(project_dir.join(".tauri").join("plugins"))?;
-    Ok(())
   }
+  Ok(())
 }
 
 fn log_finished(outputs: Vec<PathBuf>, kind: &str) {

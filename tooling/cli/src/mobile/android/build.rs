@@ -3,25 +3,30 @@
 // SPDX-License-Identifier: MIT
 
 use super::{
-  configure_cargo, delete_codegen_vars, ensure_init, env, log_finished, open_and_wait, with_config,
-  MobileTarget,
+  configure_cargo, delete_codegen_vars, ensure_init, env, get_app, get_config, inject_assets,
+  log_finished, open_and_wait, MobileTarget,
 };
 use crate::{
   build::Options as BuildOptions,
-  helpers::{config::get as get_config, flock},
+  helpers::{
+    app_paths::tauri_dir,
+    config::{get as get_tauri_config, ConfigHandle},
+    flock, resolve_merge_config,
+  },
   interface::{AppSettings, Interface, Options as InterfaceOptions},
   mobile::{write_options, CliOptions},
   Result,
 };
 use clap::{ArgAction, Parser};
 
-use tauri_mobile::{
+use anyhow::Context;
+use cargo_mobile2::{
   android::{aab, apk, config::Config as AndroidConfig, env::Env, target::Target},
   opts::{NoiseLevel, Profile},
   target::TargetTrait,
 };
 
-use std::env::set_var;
+use std::env::{set_current_dir, set_var};
 
 #[derive(Debug, Clone, Parser)]
 #[clap(about = "Android build")]
@@ -73,58 +78,80 @@ impl From<Options> for BuildOptions {
   }
 }
 
-pub fn command(options: Options, noise_level: NoiseLevel) -> Result<()> {
+pub fn command(mut options: Options, noise_level: NoiseLevel) -> Result<()> {
   delete_codegen_vars();
-  with_config(
-    Some(Default::default()),
-    |app, config, metadata, _cli_options| {
-      set_var("WRY_RUSTWEBVIEWCLIENT_CLASS_EXTENSION", "");
-      set_var("WRY_RUSTWEBVIEW_CLASS_INIT", "");
 
-      ensure_init(config.project_dir(), MobileTarget::Android)?;
+  let (merge_config, _merge_config_path) = resolve_merge_config(&options.config)?;
+  options.config = merge_config;
 
-      let mut env = env()?;
-      configure_cargo(app, Some((&mut env, config)))?;
+  let tauri_config = get_tauri_config(
+    tauri_utils::platform::Target::Android,
+    options.config.as_deref(),
+  )?;
+  let (app, config, metadata) = {
+    let tauri_config_guard = tauri_config.lock().unwrap();
+    let tauri_config_ = tauri_config_guard.as_ref().unwrap();
+    let app = get_app(tauri_config_);
+    let (config, metadata) = get_config(&app, tauri_config_, &Default::default());
+    (app, config, metadata)
+  };
 
-      // run an initial build to initialize plugins
-      Target::all().values().next().unwrap().build(
-        config,
-        metadata,
-        &env,
-        noise_level,
-        true,
-        if options.debug {
-          Profile::Debug
-        } else {
-          Profile::Release
-        },
-      )?;
+  set_var("WRY_RUSTWEBVIEWCLIENT_CLASS_EXTENSION", "");
+  set_var("WRY_RUSTWEBVIEW_CLASS_INIT", "");
 
-      let open = options.open;
-      run_build(options, config, &mut env, noise_level)?;
-
-      if open {
-        open_and_wait(config, &env);
-      }
-
-      Ok(())
-    },
-  )
-  .map_err(Into::into)
-}
-
-fn run_build(
-  mut options: Options,
-  config: &AndroidConfig,
-  env: &mut Env,
-  noise_level: NoiseLevel,
-) -> Result<()> {
   let profile = if options.debug {
     Profile::Debug
   } else {
     Profile::Release
   };
 
+  let tauri_path = tauri_dir();
+  set_current_dir(tauri_path).with_context(|| "failed to change current working directory")?;
+
+  ensure_init(config.project_dir(), MobileTarget::Android)?;
+
+  let mut env = env()?;
+  configure_cargo(&app, Some((&mut env, &config)))?;
+
+  // run an initial build to initialize plugins
+  Target::all().values().next().unwrap().build(
+    &config,
+    &metadata,
+    &env,
+    noise_level,
+    true,
+    if options.debug {
+      Profile::Debug
+    } else {
+      Profile::Release
+    },
+  )?;
+
+  let open = options.open;
+  run_build(
+    options,
+    tauri_config,
+    profile,
+    &config,
+    &mut env,
+    noise_level,
+  )?;
+
+  if open {
+    open_and_wait(&config, &env);
+  }
+
+  Ok(())
+}
+
+fn run_build(
+  mut options: Options,
+  tauri_config: ConfigHandle,
+  profile: Profile,
+  config: &AndroidConfig,
+  env: &mut Env,
+  noise_level: NoiseLevel,
+) -> Result<()> {
   if !(options.apk || options.aab) {
     // if the user didn't specify the format to build, we'll do both
     options.apk = true;
@@ -139,7 +166,11 @@ fn run_build(
       .triple
       .into(),
   );
-  let interface = crate::build::setup(&mut build_options, true)?;
+  let interface = crate::build::setup(
+    tauri_utils::platform::Target::Android,
+    &mut build_options,
+    true,
+  )?;
 
   let interface_options = InterfaceOptions {
     debug: build_options.debug,
@@ -159,7 +190,7 @@ fn run_build(
     vars: Default::default(),
   };
   let _handle = write_options(
-    &get_config(options.config.as_deref())?
+    &tauri_config
       .lock()
       .unwrap()
       .as_ref()
@@ -175,13 +206,15 @@ fn run_build(
     .get_or_insert(Vec::new())
     .push("custom-protocol".into());
 
+  inject_assets(config, tauri_config.lock().unwrap().as_ref().unwrap())?;
+
   let apk_outputs = if options.apk {
     apk::build(
       config,
       env,
       noise_level,
       profile,
-      get_targets_or_all(Vec::new())?,
+      get_targets_or_all(options.targets.clone().unwrap_or_default())?,
       options.split_per_abi,
     )?
   } else {
@@ -194,7 +227,7 @@ fn run_build(
       env,
       noise_level,
       profile,
-      get_targets_or_all(Vec::new())?,
+      get_targets_or_all(options.targets.unwrap_or_default())?,
       options.split_per_abi,
     )?
   } else {
