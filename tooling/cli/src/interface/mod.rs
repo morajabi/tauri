@@ -8,12 +8,13 @@ use std::{
   collections::HashMap,
   path::{Path, PathBuf},
   process::ExitStatus,
+  sync::Arc,
 };
 
 use crate::helpers::config::Config;
 use tauri_bundler::bundle::{PackageType, Settings, SettingsBuilder};
 
-pub use rust::{manifest, MobileOptions, Options, Rust as AppInterface};
+pub use rust::{MobileOptions, Options, Rust as AppInterface};
 
 pub trait DevProcess {
   fn kill(&self) -> std::io::Result<()>;
@@ -87,7 +88,7 @@ pub trait Interface: Sized {
   type AppSettings: AppSettings;
 
   fn new(config: &Config, target: Option<String>) -> crate::Result<Self>;
-  fn app_settings(&self) -> &Self::AppSettings;
+  fn app_settings(&self) -> Arc<Self::AppSettings>;
   fn env(&self) -> HashMap<&str, String>;
   fn build(&mut self, options: Options) -> crate::Result<()>;
   fn dev<F: Fn(Option<i32>, ExitReason) + Send + Sync + 'static>(

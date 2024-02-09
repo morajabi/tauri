@@ -11,6 +11,7 @@
   html_favicon_url = "https://github.com/tauri-apps/tauri/raw/dev/app-icon.png"
 )]
 
+use anyhow::Context;
 pub use anyhow::Result;
 
 mod add;
@@ -37,8 +38,38 @@ use std::process::{exit, Command, ExitStatus, Output, Stdio};
 use std::{
   ffi::OsString,
   fmt::Display,
+  fs::read_to_string,
+  io::BufRead,
+  path::PathBuf,
+  str::FromStr,
   sync::{Arc, Mutex},
 };
+
+/// Tauri configuration argument option.
+#[derive(Debug, Clone)]
+pub struct ConfigValue(pub(crate) serde_json::Value);
+
+impl FromStr for ConfigValue {
+  type Err = anyhow::Error;
+
+  fn from_str(config: &str) -> std::result::Result<Self, Self::Err> {
+    if config.starts_with('{') {
+      Ok(Self(
+        serde_json::from_str(config).context("invalid configuration JSON")?,
+      ))
+    } else {
+      let path = PathBuf::from(config);
+      if path.exists() {
+        Ok(Self(serde_json::from_str(
+          &read_to_string(&path)
+            .with_context(|| format!("invalid configuration at file {config}"))?,
+        )?))
+      } else {
+        anyhow::bail!("provided configuration path does not exist")
+      }
+    }
+  }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum RunMode {
@@ -68,6 +99,8 @@ pub struct VersionMetadata {
   tauri: String,
   #[serde(rename = "tauri-build")]
   tauri_build: String,
+  #[serde(rename = "tauri-plugin")]
+  tauri_plugin: String,
 }
 
 #[derive(Deserialize)]
@@ -98,20 +131,20 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-  Build(build::Options),
-  Dev(dev::Options),
-  Add(add::Options),
-  Icon(icon::Options),
-  Info(info::Options),
   Init(init::Options),
-  Plugin(plugin::Cli),
-  Signer(signer::Cli),
-  Completions(completions::Options),
+  Dev(dev::Options),
+  Build(build::Options),
   Android(mobile::android::Cli),
   #[cfg(target_os = "macos")]
   Ios(mobile::ios::Cli),
   /// Migrate from v1 to v2
   Migrate,
+  Info(info::Options),
+  Add(add::Options),
+  Plugin(plugin::Cli),
+  Icon(icon::Options),
+  Signer(signer::Cli),
+  Completions(completions::Options),
 }
 
 fn format_error<I: CommandFactory>(err: clap::Error) -> clap::Error {
@@ -273,16 +306,18 @@ impl CommandExt for Command {
     let stdout_lines = Arc::new(Mutex::new(Vec::new()));
     let stdout_lines_ = stdout_lines.clone();
     std::thread::spawn(move || {
-      let mut buf = Vec::new();
+      let mut line = String::new();
       let mut lines = stdout_lines_.lock().unwrap();
       loop {
-        buf.clear();
-        if let Ok(0) = tauri_utils::io::read_line(&mut stdout, &mut buf) {
-          break;
+        line.clear();
+        match stdout.read_line(&mut line) {
+          Ok(0) => break,
+          Ok(_) => {
+            debug!(action = "stdout"; "{}", line.trim_end());
+            lines.extend(line.as_bytes().to_vec());
+          }
+          Err(_) => (),
         }
-        debug!(action = "stdout"; "{}", String::from_utf8_lossy(&buf));
-        lines.extend(buf.clone());
-        lines.push(b'\n');
       }
     });
 
@@ -290,16 +325,18 @@ impl CommandExt for Command {
     let stderr_lines = Arc::new(Mutex::new(Vec::new()));
     let stderr_lines_ = stderr_lines.clone();
     std::thread::spawn(move || {
-      let mut buf = Vec::new();
+      let mut line = String::new();
       let mut lines = stderr_lines_.lock().unwrap();
       loop {
-        buf.clear();
-        if let Ok(0) = tauri_utils::io::read_line(&mut stderr, &mut buf) {
-          break;
+        line.clear();
+        match stderr.read_line(&mut line) {
+          Ok(0) => break,
+          Ok(_) => {
+            debug!(action = "stderr"; "{}", line.trim_end());
+            lines.extend(line.as_bytes().to_vec());
+          }
+          Err(_) => (),
         }
-        debug!(action = "stderr"; "{}", String::from_utf8_lossy(&buf));
-        lines.extend(buf.clone());
-        lines.push(b'\n');
       }
     });
 

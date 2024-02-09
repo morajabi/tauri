@@ -4,7 +4,7 @@
 
 use axum::{
   extract::{ws::WebSocket, WebSocketUpgrade},
-  http::{header::CONTENT_TYPE, Request, StatusCode},
+  http::{header::CONTENT_TYPE, StatusCode, Uri},
   response::IntoResponse,
   routing::get,
   Router, Server,
@@ -31,11 +31,7 @@ struct State {
   tx: Sender<()>,
 }
 
-pub fn start_dev_server<P: AsRef<Path>>(
-  path: P,
-  ip: IpAddr,
-  port: Option<u16>,
-) -> crate::Result<SocketAddr> {
+pub fn start<P: AsRef<Path>>(path: P, ip: IpAddr, port: Option<u16>) -> crate::Result<SocketAddr> {
   let serve_dir = path.as_ref().to_path_buf();
 
   let (server_url_tx, server_url_rx) = std::sync::mpsc::channel();
@@ -52,7 +48,7 @@ pub fn start_dev_server<P: AsRef<Path>>(
         let serve_dir_ = serve_dir.clone();
         thread::spawn(move || {
           let (tx, rx) = sync_channel(1);
-          let mut watcher = new_debouncer(Duration::from_secs(1), None, move |r| {
+          let mut watcher = new_debouncer(Duration::from_secs(1), move |r| {
             if let Ok(events) = r {
               tx.send(events).unwrap()
             }
@@ -73,13 +69,8 @@ pub fn start_dev_server<P: AsRef<Path>>(
 
         let mut auto_port = false;
         let mut port = port.unwrap_or_else(|| {
-          std::env::var("TAURI_DEV_SERVER_PORT")
-            .unwrap_or_else(|_| {
-              auto_port = true;
-              "1430".to_string()
-            })
-            .parse()
-            .unwrap()
+          auto_port = true;
+          1430
         });
 
         let (server, server_url) = loop {
@@ -102,17 +93,9 @@ pub fn start_dev_server<P: AsRef<Path>>(
           tx,
           address: server_url,
         });
+        let state_ = state.clone();
         let router = Router::new()
-          .fallback(
-            Router::new().nest(
-              "/",
-              get({
-                let state = state.clone();
-                move |req| handler(req, state)
-              })
-              .handle_error(|_error| async move { StatusCode::INTERNAL_SERVER_ERROR }),
-            ),
-          )
+          .fallback(move |uri| handler(uri, state_))
           .route(
             "/__tauri_cli",
             get(move |ws: WebSocketUpgrade| async move {
@@ -139,8 +122,8 @@ pub fn start_dev_server<P: AsRef<Path>>(
   server_url_rx.recv().unwrap()
 }
 
-async fn handler<T>(req: Request<T>, state: Arc<State>) -> impl IntoResponse {
-  let uri = req.uri().to_string();
+async fn handler(uri: Uri, state: Arc<State>) -> impl IntoResponse {
+  let uri = uri.to_string();
   let uri = if uri == "/" {
     &uri
   } else {

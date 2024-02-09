@@ -2,10 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
 
-use anyhow::Context;
 use json_patch::merge;
 use log::error;
-use once_cell::sync::Lazy;
 use serde_json::Value as JsonValue;
 
 pub use tauri_utils::{config::*, platform::Target};
@@ -15,7 +13,7 @@ use std::{
   env::{current_dir, set_current_dir, set_var, var_os},
   ffi::OsStr,
   process::exit,
-  sync::{Arc, Mutex},
+  sync::{Arc, Mutex, OnceLock},
 };
 
 pub const MERGE_CONFIG_EXTENSION_NAME: &str = "--config";
@@ -52,7 +50,7 @@ impl ConfigMetadata {
         .and_then(|bundle_config| bundle_config.get("identifier"))
         .and_then(|id| id.as_str())
       {
-        if identifier == self.inner.tauri.bundle.identifier {
+        if identifier == self.inner.identifier {
           return Some(ext.clone());
         }
       }
@@ -91,18 +89,16 @@ pub fn wix_settings(config: WixConfig) -> tauri_bundler::WixSettings {
     feature_refs: config.feature_refs,
     merge_refs: config.merge_refs,
     skip_webview_install: config.skip_webview_install,
-    license: config.license,
     enable_elevated_update_task: config.enable_elevated_update_task,
     banner_path: config.banner_path,
     dialog_image_path: config.dialog_image_path,
-    fips_compliant: var_os("TAURI_FIPS_COMPLIANT").map_or(false, |v| v == "true"),
+    fips_compliant: var_os("TAURI_BUNDLER_WIX_FIPS_COMPLIANT").map_or(false, |v| v == "true"),
   }
 }
 
 pub fn nsis_settings(config: NsisConfig) -> tauri_bundler::NsisSettings {
   tauri_bundler::NsisSettings {
     template: config.template,
-    license: config.license,
     header_image: config.header_image,
     sidebar_image: config.sidebar_image,
     installer_icon: config.installer_icon,
@@ -110,17 +106,18 @@ pub fn nsis_settings(config: NsisConfig) -> tauri_bundler::NsisSettings {
     languages: config.languages,
     custom_language_files: config.custom_language_files,
     display_language_selector: config.display_language_selector,
+    compression: config.compression,
   }
 }
 
 fn config_handle() -> &'static ConfigHandle {
-  static CONFING_HANDLE: Lazy<ConfigHandle> = Lazy::new(Default::default);
-  &CONFING_HANDLE
+  static CONFIG_HANDLE: OnceLock<ConfigHandle> = OnceLock::new();
+  CONFIG_HANDLE.get_or_init(Default::default)
 }
 
 /// Gets the static parsed config from `tauri.conf.json`.
 fn get_internal(
-  merge_config: Option<&str>,
+  merge_config: Option<&serde_json::Value>,
   reload: bool,
   target: Target,
 ) -> crate::Result<ConfigHandle> {
@@ -145,11 +142,10 @@ fn get_internal(
   }
 
   if let Some(merge_config) = merge_config {
-    set_var("TAURI_CONFIG", merge_config);
-    let merge_config: JsonValue =
-      serde_json::from_str(merge_config).with_context(|| "failed to parse config to merge")?;
-    merge(&mut config, &merge_config);
-    extensions.insert(MERGE_CONFIG_EXTENSION_NAME.into(), merge_config);
+    let merge_config_str = serde_json::to_string(&merge_config).unwrap();
+    set_var("TAURI_CONFIG", merge_config_str);
+    merge(&mut config, merge_config);
+    extensions.insert(MERGE_CONFIG_EXTENSION_NAME.into(), merge_config.clone());
   };
 
   if config_path.extension() == Some(OsStr::new("json"))
@@ -200,11 +196,14 @@ fn get_internal(
   Ok(config_handle().clone())
 }
 
-pub fn get(target: Target, merge_config: Option<&str>) -> crate::Result<ConfigHandle> {
+pub fn get(
+  target: Target,
+  merge_config: Option<&serde_json::Value>,
+) -> crate::Result<ConfigHandle> {
   get_internal(merge_config, false, target)
 }
 
-pub fn reload(merge_config: Option<&str>) -> crate::Result<ConfigHandle> {
+pub fn reload(merge_config: Option<&serde_json::Value>) -> crate::Result<ConfigHandle> {
   let target = config_handle()
     .lock()
     .unwrap()

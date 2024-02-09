@@ -4,14 +4,14 @@
 
 /// FS scope.
 pub mod fs;
-/// IPC scope.
-pub mod ipc;
 
 use std::path::Path;
 
+/// Unique id of a scope event.
+pub type ScopeEventId = u32;
+
 /// Managed state for all the core scopes in a tauri application.
 pub struct Scopes {
-  pub(crate) ipc: ipc::Scope,
   #[cfg(feature = "protocol-asset")]
   pub(crate) asset_protocol: fs::Scope,
 }

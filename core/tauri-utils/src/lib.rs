@@ -24,6 +24,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use log::warn;
 
+pub mod acl;
 pub mod assets;
 pub mod config;
 pub mod html;
@@ -33,6 +34,11 @@ pub mod platform;
 /// Prepare application resources and sidecars.
 #[cfg(feature = "resources")]
 pub mod resources;
+#[cfg(feature = "build")]
+pub mod tokens;
+
+#[cfg(feature = "build")]
+pub mod build;
 
 /// Application pattern.
 pub mod pattern;
@@ -127,6 +133,12 @@ mod window_effects {
     MicaDark,
     /// Mica effect with light mode **Windows 11 Only**
     MicaLight,
+    /// Tabbed effect that matches the system dark perefence **Windows 11 Only**
+    Tabbed,
+    /// Tabbed effect with dark mode but only if dark mode is enabled on the system **Windows 11 Only**
+    TabbedDark,
+    /// Tabbed effect with light mode **Windows 11 Only**
+    TabbedLight,
     /// **Windows 7/10/11(22H1) Only**
     ///
     /// ## Notes
@@ -160,7 +172,7 @@ mod window_effects {
 pub use window_effects::{WindowEffect, WindowEffectState};
 
 /// How the window title bar should be displayed on macOS.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum TitleBarStyle {
   /// A normal title bar.
@@ -409,4 +421,32 @@ pub fn display_path<P: AsRef<Path>>(p: P) -> String {
   dunce::simplified(&p.as_ref().components().collect::<PathBuf>())
     .display()
     .to_string()
+}
+
+/// Progress bar status.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProgressBarStatus {
+  /// Hide progress bar.
+  None,
+  /// Normal state.
+  Normal,
+  /// Indeterminate state. **Treated as Normal on Linux and macOS**
+  Indeterminate,
+  /// Paused state. **Treated as Normal on Linux**
+  Paused,
+  /// Error state. **Treated as Normal on Linux**
+  Error,
+}
+
+/// Progress Bar State
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressBarState {
+  /// The progress bar status.
+  pub status: Option<ProgressBarStatus>,
+  /// The progress bar progress. This can be a value ranging from `0` to `100`
+  pub progress: Option<u64>,
+  /// The identifier for your app to communicate with the Unity desktop window manager **Linux Only**
+  pub unity_uri: Option<String>,
 }

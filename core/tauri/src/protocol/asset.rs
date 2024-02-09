@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
 
-use crate::{path::SafePathBuf, scope, window::UriSchemeProtocolHandler};
+use crate::{path::SafePathBuf, scope, webview::UriSchemeProtocolHandler};
 use http::{header::*, status::StatusCode, Request, Response};
 use http_range::HttpRange;
-use rand::RngCore;
 use std::{borrow::Cow, io::SeekFrom};
 use tauri_utils::debug_eprintln;
 use tauri_utils::mime_type::MimeType;
@@ -20,6 +19,7 @@ pub fn get(scope: scope::fs::Scope, window_origin: String) -> UriSchemeProtocolH
         http::Response::builder()
           .status(http::StatusCode::BAD_REQUEST)
           .header(CONTENT_TYPE, mime::TEXT_PLAIN.essence_str())
+          .header("Access-Control-Allow-Origin", &window_origin)
           .body(e.to_string().as_bytes().to_vec())
           .unwrap(),
       ),
@@ -37,23 +37,17 @@ fn get_response(
     .decode_utf8_lossy()
     .to_string();
 
+  let mut resp = Response::builder().header("Access-Control-Allow-Origin", window_origin);
+
   if let Err(e) = SafePathBuf::new(path.clone().into()) {
     debug_eprintln!("asset protocol path \"{}\" is not valid: {}", path, e);
-    return Response::builder()
-      .status(403)
-      .body(Vec::new().into())
-      .map_err(Into::into);
+    return resp.status(403).body(Vec::new().into()).map_err(Into::into);
   }
 
   if !scope.is_allowed(&path) {
     debug_eprintln!("asset protocol not configured to allow the path: {}", path);
-    return Response::builder()
-      .status(403)
-      .body(Vec::new().into())
-      .map_err(Into::into);
+    return resp.status(403).body(Vec::new().into()).map_err(Into::into);
   }
-
-  let mut resp = Response::builder().header("Access-Control-Allow-Origin", window_origin);
 
   let (mut file, len, mime_type, read_bytes) = crate::async_runtime::safe_block_on(async move {
     let mut file = File::open(&path).await?;
@@ -227,7 +221,7 @@ fn get_response(
 
 fn random_boundary() -> String {
   let mut x = [0_u8; 30];
-  rand::thread_rng().fill_bytes(&mut x);
+  getrandom::getrandom(&mut x).expect("failed to get random bytes");
   (x[..])
     .iter()
     .map(|&x| format!("{x:x}"))

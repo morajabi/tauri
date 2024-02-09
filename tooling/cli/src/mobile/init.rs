@@ -3,8 +3,11 @@
 // SPDX-License-Identifier: MIT
 
 use super::{get_app, Target};
-use crate::helpers::{config::get as get_tauri_config, template::JsonMap};
-use crate::Result;
+use crate::{
+  helpers::{app_paths::tauri_dir, config::get as get_tauri_config, template::JsonMap},
+  interface::{AppInterface, Interface},
+  Result,
+};
 use cargo_mobile2::{
   android::{
     config::Config as AndroidConfig, env::Env as AndroidEnv, target::Target as AndroidTarget,
@@ -15,9 +18,12 @@ use cargo_mobile2::{
   util::{
     self,
     cli::{Report, TextWrapper},
+    relativize_path,
   },
 };
-use handlebars::{Context, Handlebars, Helper, HelperResult, Output, RenderContext, RenderError};
+use handlebars::{
+  Context, Handlebars, Helper, HelperResult, Output, RenderContext, RenderError, RenderErrorReason,
+};
 
 use std::{
   env::{current_dir, var, var_os},
@@ -30,7 +36,7 @@ pub fn command(
   reinstall_deps: bool,
   skip_targets_install: bool,
 ) -> Result<()> {
-  let wrapper = TextWrapper::with_splitter(textwrap::termwidth(), textwrap::NoHyphenation);
+  let wrapper = TextWrapper::default();
 
   exec(
     target,
@@ -93,9 +99,16 @@ pub fn exec(
   let tauri_config_guard = tauri_config.lock().unwrap();
   let tauri_config_ = tauri_config_guard.as_ref().unwrap();
 
-  let app = get_app(tauri_config_);
+  let app = get_app(tauri_config_, &AppInterface::new(tauri_config_, None)?);
 
   let (handlebars, mut map) = handlebars(&app);
+
+  // the CWD used when the the IDE runs the android-studio-script or the xcode-script
+  let ide_run_cwd = if target == Target::Android {
+    tauri_dir()
+  } else {
+    tauri_dir().join("gen/apple")
+  };
 
   let mut args = std::env::args_os();
   let mut binary = args
@@ -104,7 +117,7 @@ pub fn exec(
       let path = PathBuf::from(&bin);
       if path.exists() {
         let absolute_path = util::prefix_path(&current_dir, path);
-        return absolute_path.into();
+        return relativize_path(absolute_path, &ide_run_cwd).into_os_string();
       }
       bin
     })
@@ -114,11 +127,16 @@ pub fn exec(
     let path = PathBuf::from(&arg);
     if path.exists() {
       let absolute_path = util::prefix_path(&current_dir, path);
-      build_args.push(absolute_path.to_string_lossy().into_owned());
+      build_args.push(
+        relativize_path(absolute_path, &ide_run_cwd)
+          .to_string_lossy()
+          .into_owned(),
+      );
       continue;
     }
+    let is_mobile_cmd_arg = arg == "android" || arg == "ios";
     build_args.push(arg.to_string_lossy().into_owned());
-    if arg == "android" || arg == "ios" {
+    if is_mobile_cmd_arg {
       break;
     }
   }
@@ -163,7 +181,6 @@ pub fn exec(
     // Generate Android Studio project
     Target::Android => match AndroidEnv::new() {
       Ok(_env) => {
-        let app = get_app(tauri_config_);
         let (config, metadata) =
           super::android::get_config(&app, tauri_config_, &Default::default());
         map.insert("android", &config);
@@ -287,7 +304,9 @@ fn join(
   out
     .write(
       &get_str_array(helper, |s| s.to_string())
-        .ok_or_else(|| RenderError::new("`join` helper wasn't given an array"))?
+        .ok_or_else(|| {
+          RenderErrorReason::ParamTypeMismatchForName("join", "0".to_owned(), "array".to_owned())
+        })?
         .join(", "),
     )
     .map_err(Into::into)
@@ -303,7 +322,13 @@ fn quote_and_join(
   out
     .write(
       &get_str_array(helper, |s| format!("{s:?}"))
-        .ok_or_else(|| RenderError::new("`quote-and-join` helper wasn't given an array"))?
+        .ok_or_else(|| {
+          RenderErrorReason::ParamTypeMismatchForName(
+            "quote-and-join",
+            "0".to_owned(),
+            "array".to_owned(),
+          )
+        })?
         .join(", "),
     )
     .map_err(Into::into)
@@ -320,7 +345,11 @@ fn quote_and_join_colon_prefix(
     .write(
       &get_str_array(helper, |s| format!("{:?}", format!(":{s}")))
         .ok_or_else(|| {
-          RenderError::new("`quote-and-join-colon-prefix` helper wasn't given an array")
+          RenderErrorReason::ParamTypeMismatchForName(
+            "quote-and-join-colon-prefix",
+            "0".to_owned(),
+            "array".to_owned(),
+          )
         })?
         .join(", "),
     )
@@ -369,12 +398,14 @@ fn app_root(ctx: &Context) -> Result<&str, RenderError> {
   let app_root = ctx
     .data()
     .get("app")
-    .ok_or_else(|| RenderError::new("`app` missing from template data."))?
+    .ok_or_else(|| RenderErrorReason::Other("`app` missing from template data.".to_owned()))?
     .get("root-dir")
-    .ok_or_else(|| RenderError::new("`app.root-dir` missing from template data."))?;
-  app_root
-    .as_str()
-    .ok_or_else(|| RenderError::new("`app.root-dir` contained invalid UTF-8."))
+    .ok_or_else(|| {
+      RenderErrorReason::Other("`app.root-dir` missing from template data.".to_owned())
+    })?;
+  app_root.as_str().ok_or_else(|| {
+    RenderErrorReason::Other("`app.root-dir` contained invalid UTF-8.".to_owned()).into()
+  })
 }
 
 fn prefix_path(
@@ -389,8 +420,8 @@ fn prefix_path(
       util::prefix_path(app_root(ctx)?, get_str(helper))
         .to_str()
         .ok_or_else(|| {
-          RenderError::new(
-            "Either the `app.root-dir` or the specified path contained invalid UTF-8.",
+          RenderErrorReason::Other(
+            "Either the `app.root-dir` or the specified path contained invalid UTF-8.".to_owned(),
           )
         })?,
     )
@@ -408,12 +439,14 @@ fn unprefix_path(
     .write(
       util::unprefix_path(app_root(ctx)?, get_str(helper))
         .map_err(|_| {
-          RenderError::new("Attempted to unprefix a path that wasn't in the app root dir.")
+          RenderErrorReason::Other(
+            "Attempted to unprefix a path that wasn't in the app root dir.".to_owned(),
+          )
         })?
         .to_str()
         .ok_or_else(|| {
-          RenderError::new(
-            "Either the `app.root-dir` or the specified path contained invalid UTF-8.",
+          RenderErrorReason::Other(
+            "Either the `app.root-dir` or the specified path contained invalid UTF-8.".to_owned(),
           )
         })?,
     )

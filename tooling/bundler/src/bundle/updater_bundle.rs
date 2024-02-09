@@ -238,6 +238,7 @@ fn create_tar(src_dir: &Path, dest_path: &Path) -> crate::Result<PathBuf> {
   let gzip_encoder = libflate::gzip::Encoder::new(dest_file)?;
 
   let gzip_encoder = create_tar_from_src(src_dir, gzip_encoder)?;
+
   let mut dest_file = gzip_encoder.finish().into_result()?;
   dest_file.flush()?;
   Ok(dest_path.to_owned())

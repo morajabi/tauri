@@ -1,5 +1,82 @@
 # Changelog
 
+## \[2.0.0-beta.1]
+
+### Dependencies
+
+- Upgraded to `tauri-utils@2.0.0-beta.1`
+
+## \[2.0.0-beta.0]
+
+### New Features
+
+- [`74a2a603`](https://www.github.com/tauri-apps/tauri/commit/74a2a6036a5e57462f161d728cbd8a6f121028ca)([#8661](https://www.github.com/tauri-apps/tauri/pull/8661)) Implement access control list for IPC usage.
+
+### Dependencies
+
+- Upgraded to `tauri-utils@2.0.0-beta.0`
+
+### Breaking Changes
+
+- [`8de308d1`](https://www.github.com/tauri-apps/tauri/commit/8de308d1bf6a855d7a26af58bd0e744938ba47d8)([#8723](https://www.github.com/tauri-apps/tauri/pull/8723)) Restructured Tauri config per [RFC#5](https://github.com/tauri-apps/rfcs/blob/f3e82a6b0c5390401e855850d47dc7b7d9afd684/texts/0005-tauri-config-restructure.md):
+
+  - Moved `package.productName`, `package.version` and `tauri.bundle.identifier` fields to the top-level.
+  - Removed `package` object.
+  - Renamed `tauri` object to `app`.
+  - Moved `tauri.bundle` object to the top-level.
+  - Renamed `build.distDir` field to `frontendDist`.
+  - Renamed `build.devPath` field to `devUrl` and will no longer accepts paths, it will only accept URLs.
+  - Moved `tauri.pattern` to `app.security.pattern`.
+  - Removed `tauri.bundle.updater` object, and its fields have been moved to the updater plugin under `plugins.updater` object.
+  - Moved `build.withGlobalTauri` to `app.withGlobalTauri`.
+  - Moved `tauri.bundle.dmg` object to `bundle.macOS.dmg`.
+  - Moved `tauri.bundle.deb` object to `bundle.linux.deb`.
+  - Moved `tauri.bundle.appimage` object to `bundle.linux.appimage`.
+  - Removed all license fields from each bundle configuration object and instead added `bundle.license` and `bundle.licenseFile`.
+  - Renamed `AppUrl` to `FrontendDist` and refactored its variants to be more explicit.
+
+## \[2.0.0-alpha.13]
+
+### Dependencies
+
+- Upgraded to `tauri-utils@2.0.0-alpha.13`
+
+## \[2.0.0-alpha.12]
+
+### Dependencies
+
+- Upgraded to `tauri-utils@2.0.0-alpha.12`
+
+## \[2.0.0-alpha.11]
+
+### Dependencies
+
+- Upgraded to `tauri-utils@2.0.0-alpha.11`
+
+## \[2.0.0-alpha.10]
+
+### Enhancements
+
+- [`c6c59cf2`](https://www.github.com/tauri-apps/tauri/commit/c6c59cf2373258b626b00a26f4de4331765dd487) Pull changes from Tauri 1.5 release.
+
+### Dependencies
+
+- Upgraded to `tauri-utils@2.0.0-alpha.10`
+
+## \[2.0.0-alpha.9]
+
+### New Features
+
+- [`880266a7`](https://www.github.com/tauri-apps/tauri/commit/880266a7f697e1fe58d685de3bb6836ce5251e92)([#8031](https://www.github.com/tauri-apps/tauri/pull/8031)) Bump the MSRV to 1.70.
+
+### Dependencies
+
+- Upgraded to `tauri-utils@2.0.0-alpha.9`
+
+### Breaking Changes
+
+- [`ebcc21e4`](https://www.github.com/tauri-apps/tauri/commit/ebcc21e4b95f4e8c27639fb1bca545b432f52d5e)([#8057](https://www.github.com/tauri-apps/tauri/pull/8057)) Renamed the beforeDevCommand, beforeBuildCommand and beforeBundleCommand hooks environment variables from `TAURI_PLATFORM, TAURI_ARCH, TAURI_FAMILY, TAURI_PLATFORM_VERSION, TAURI_PLATFORM_TYPE and TAURI_DEBUG` to `TAURI_ENV_PLATFORM, TAURI_ENV_ARCH, TAURI_ENV_FAMILY, TAURI_ENV_PLATFORM_VERSION, TAURI_ENV_PLATFORM_TYPE and TAURI_ENV_DEBUG` to differentiate the prefix with other CLI environment variables.
+
 ## \[2.0.0-alpha.8]
 
 ### Enhancements
@@ -57,6 +134,12 @@
   - [6f061504](https://www.github.com/tauri-apps/tauri/commit/6f0615044d09ec58393a7ebca5e45bb175e20db3) feat(cli): add `android dev` and `ios dev` commands ([#4982](https://www.github.com/tauri-apps/tauri/pull/4982)) on 2022-08-20
 - First mobile alpha release!
   - [fa3a1098](https://www.github.com/tauri-apps/tauri/commit/fa3a10988a03aed1b66fb17d893b1a9adb90f7cd) feat(ci): prepare 2.0.0-alpha.0 ([#5786](https://www.github.com/tauri-apps/tauri/pull/5786)) on 2022-12-08
+
+## \[1.4.1]
+
+### Dependencies
+
+- Upgraded to `tauri-utils@1.5.0`
 
 ## \[1.4.0]
 
